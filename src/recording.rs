@@ -55,6 +55,7 @@ pub async fn start_ffmpeg(state: &AppState, req: &StartReq) -> Result<()> {
             let mut cmd = Command::new("ffmpeg");
             cmd.kill_on_drop(true)
                 .arg("-y")
+                .arg("-re")
                 .args(["-i", &input_url])
                 .args(["-c", "copy"])
                 .args(["-f", "hls"])
@@ -145,24 +146,40 @@ pub async fn finalize_to_vod(state: &AppState, name: &str) -> Result<()> {
     }
     fs::create_dir_all(&dst_dir).await?;
 
-    // 4) copy segments and adjust URIs
+    // 4) move segments without duplication and adjust URIs
+    info!(%name, total_segments=segments.len(), "finalizing recording - moving segments");
     for seg in &segments {
         let src = normalize_segment_path(&state.pending_dir, seg);
         let dst = dst_dir.join(Path::new(seg).file_name().unwrap());
-        if let Err(e) = fs::copy(&src, &dst).await {
-            error!(src=?src, dst=?dst, %e, "segment copy failed");
-            anyhow::bail!("Could not copy segment: {}", src.display());
+        info!(src=?src, dst=?dst, "moving segment");
+        match fs::rename(&src, &dst).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+                // Different filesystem: try hard link + remove
+                if let Err(e2) = fs::hard_link(&src, &dst).await {
+                    error!(src=?src, dst=?dst, error=?e2, "segment move failed");
+                    anyhow::bail!("Could not move segment: {}", src.display());
+                }
+                fs::remove_file(&src).await.ok();
+            }
+            Err(e) => {
+                error!(src=?src, dst=?dst, error=?e, "segment move failed");
+                anyhow::bail!("Could not move segment: {}", src.display());
+            }
         }
     }
 
     // 5) rewrite playlist: EVENT -> VOD, basename URIs, ENDLIST
     let vod = rewrite_playlist_to_vod(&content)?;
     fs::write(&dst_pl, vod.as_bytes()).await?;
+    info!(playlist=?dst_pl, "VOD playlist written");
 
-    // 6) optional: remove pending files (only if saving space)
-    // fs::remove_file(&src_pl).await.ok();
-    // for seg in &segments { let _ = fs::remove_file(normalize_segment_path(&state.pending_dir, seg)).await; }
+    // 6) remove pending playlist to save space
+    if let Err(e) = fs::remove_file(&src_pl).await {
+        error!(file=?src_pl, error=?e, "failed to remove pending playlist");
+    }
 
+    info!(%name, "recording finalized");
     Ok(())
 }
 
