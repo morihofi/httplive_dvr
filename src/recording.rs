@@ -30,6 +30,13 @@ pub async fn start_ffmpeg(state: &AppState, req: &StartReq) -> Result<()> {
         anyhow::bail!("Recording '{}' is already running", req.name);
     }
 
+    // Avoid collisions with existing playlists
+    let pending_pl = state.pending_dir.join(format!("{}.m3u8", req.name));
+    let finished_pl = state.finished_dir.join(&req.name).join("index.m3u8");
+    if fs::metadata(&pending_pl).await.is_ok() || fs::metadata(&finished_pl).await.is_ok() {
+        anyhow::bail!("Recording '{}' already exists", req.name);
+    }
+
     let playlist_name = req.name.clone();
     let input_url = req.input_url.clone();
     let hls_time = req.hls_time;
@@ -132,6 +139,10 @@ pub async fn finalize_to_vod(state: &AppState, name: &str) -> Result<()> {
 
     // 3) prepare destination directory
     let dst_dir = state.finished_dir.join(name);
+    let dst_pl = dst_dir.join("index.m3u8");
+    if fs::metadata(&dst_pl).await.is_ok() {
+        anyhow::bail!("Recording '{}' already finalized", name);
+    }
     fs::create_dir_all(&dst_dir).await?;
 
     // 4) copy segments and adjust URIs
@@ -146,7 +157,6 @@ pub async fn finalize_to_vod(state: &AppState, name: &str) -> Result<()> {
 
     // 5) rewrite playlist: EVENT -> VOD, basename URIs, ENDLIST
     let vod = rewrite_playlist_to_vod(&content)?;
-    let dst_pl = dst_dir.join("index.m3u8");
     fs::write(&dst_pl, vod.as_bytes()).await?;
 
     // 6) optional: remove pending files (only if saving space)
