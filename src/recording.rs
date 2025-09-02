@@ -35,9 +35,7 @@ pub async fn start_ffmpeg(state: &AppState, req: &StartReq, allow_existing: bool
     if !allow_existing {
         let pending_pl = state.pending_dir.join(format!("{}.m3u8", req.name));
         let finished_pl = state.finished_dir.join(&req.name).join("index.m3u8");
-        if fs::metadata(&pending_pl).await.is_ok()
-            || fs::metadata(&finished_pl).await.is_ok()
-        {
+        if fs::metadata(&pending_pl).await.is_ok() || fs::metadata(&finished_pl).await.is_ok() {
             anyhow::bail!("Recording '{}' already exists", req.name);
         }
     }
@@ -156,6 +154,10 @@ pub async fn finalize_to_vod(state: &AppState, name: &str) -> Result<()> {
     for seg in &segments {
         let src = normalize_segment_path(&state.pending_dir, seg);
         let dst = dst_dir.join(Path::new(seg).file_name().unwrap());
+        if fs::metadata(&dst).await.is_ok() {
+            debug!(dst=?dst, "segment already moved, skipping");
+            continue;
+        }
         debug!(src=?src, dst=?dst, "moving segment");
         match fs::rename(&src, &dst).await {
             Ok(_) => {}
@@ -168,6 +170,10 @@ pub async fn finalize_to_vod(state: &AppState, name: &str) -> Result<()> {
                 fs::remove_file(&src).await.ok();
             }
             Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound && fs::metadata(&dst).await.is_ok() {
+                    debug!(dst=?dst, "segment already moved, skipping");
+                    continue;
+                }
                 error!(src=?src, dst=?dst, error=?e, "segment move failed");
                 anyhow::bail!("Could not move segment: {}", src.display());
             }
