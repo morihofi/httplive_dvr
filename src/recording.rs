@@ -8,7 +8,7 @@ use tokio::{
     sync::oneshot,
     time::{Duration, sleep},
 };
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::state::AppState;
 
@@ -24,17 +24,22 @@ fn default_hls_time() -> u32 {
     6
 }
 
-pub async fn start_ffmpeg(state: &AppState, req: &StartReq) -> Result<()> {
+pub async fn start_ffmpeg(state: &AppState, req: &StartReq, allow_existing: bool) -> Result<()> {
     // If already running: return error
     if state.manager.is_running(&req.name).await {
         anyhow::bail!("Recording '{}' is already running", req.name);
     }
 
-    // Avoid collisions with existing playlists
-    let pending_pl = state.pending_dir.join(format!("{}.m3u8", req.name));
-    let finished_pl = state.finished_dir.join(&req.name).join("index.m3u8");
-    if fs::metadata(&pending_pl).await.is_ok() || fs::metadata(&finished_pl).await.is_ok() {
-        anyhow::bail!("Recording '{}' already exists", req.name);
+    // Avoid collisions with existing playlists when creating new jobs via API.
+    // Resumed recordings may already have on-disk state; in that case we allow it.
+    if !allow_existing {
+        let pending_pl = state.pending_dir.join(format!("{}.m3u8", req.name));
+        let finished_pl = state.finished_dir.join(&req.name).join("index.m3u8");
+        if fs::metadata(&pending_pl).await.is_ok()
+            || fs::metadata(&finished_pl).await.is_ok()
+        {
+            anyhow::bail!("Recording '{}' already exists", req.name);
+        }
     }
 
     let playlist_name = req.name.clone();
@@ -151,7 +156,7 @@ pub async fn finalize_to_vod(state: &AppState, name: &str) -> Result<()> {
     for seg in &segments {
         let src = normalize_segment_path(&state.pending_dir, seg);
         let dst = dst_dir.join(Path::new(seg).file_name().unwrap());
-        info!(src=?src, dst=?dst, "moving segment");
+        debug!(src=?src, dst=?dst, "moving segment");
         match fs::rename(&src, &dst).await {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {

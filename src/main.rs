@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
 
     let existing = manager.load().await?;
     for req in existing {
-        if let Err(e) = start_ffmpeg(&state, &req).await {
+        if let Err(e) = start_ffmpeg(&state, &req, true).await {
             error!(error=?e, name=%req.name, "failed to resume recording");
         }
     }

@@ -7,7 +7,7 @@ use crate::{
 };
 
 pub async fn start(State(state): State<AppState>, Json(req): Json<StartReq>) -> impl IntoResponse {
-    match start_ffmpeg(&state, &req).await {
+    match start_ffmpeg(&state, &req, false).await {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status":"started"})),
