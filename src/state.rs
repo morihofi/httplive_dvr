@@ -1,7 +1,11 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
+use crate::recording::StartReq;
 use anyhow::Result;
-use tokio::sync::{Mutex, oneshot};
+use tokio::{
+    fs,
+    sync::{Mutex, oneshot},
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -10,24 +14,55 @@ pub struct AppState {
     pub manager: Arc<RecordingManager>,
 }
 
-#[derive(Default)]
 pub struct RecordingManager {
-    // name -> stop channel
+    // name -> control
     inner: Mutex<HashMap<String, RecordingControl>>,
+    persist_path: PathBuf,
 }
 
 struct RecordingControl {
     stop: Option<oneshot::Sender<()>>,
+    req: StartReq,
 }
 
 impl RecordingManager {
-    pub async fn start(&self, name: String, stop: oneshot::Sender<()>) -> Result<()> {
-        let mut map = self.inner.lock().await;
-        if map.contains_key(&name) {
-            anyhow::bail!("Recording '{}' is already running", name);
+    pub fn new(persist_path: PathBuf) -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            persist_path,
         }
-        map.insert(name, RecordingControl { stop: Some(stop) });
+    }
+
+    async fn save(&self, map: &HashMap<String, RecordingControl>) -> Result<()> {
+        let list: Vec<&StartReq> = map.values().map(|c| &c.req).collect();
+        let json = serde_json::to_string(&list)?;
+        if let Some(parent) = self.persist_path.parent() {
+            fs::create_dir_all(parent).await.ok();
+        }
+        fs::write(&self.persist_path, json).await?;
         Ok(())
+    }
+
+    pub async fn load(&self) -> Result<Vec<StartReq>> {
+        match fs::read_to_string(&self.persist_path).await {
+            Ok(content) => Ok(serde_json::from_str(&content)?),
+            Err(_) => Ok(Vec::new()),
+        }
+    }
+
+    pub async fn start(&self, req: StartReq, stop: oneshot::Sender<()>) -> Result<()> {
+        let mut map = self.inner.lock().await;
+        if map.contains_key(&req.name) {
+            anyhow::bail!("Recording '{}' is already running", req.name);
+        }
+        map.insert(
+            req.name.clone(),
+            RecordingControl {
+                stop: Some(stop),
+                req,
+            },
+        );
+        self.save(&map).await
     }
 
     pub async fn stop(&self, name: &str) -> Result<()> {
@@ -36,13 +71,16 @@ impl RecordingManager {
             if let Some(tx) = ctrl.stop.take() {
                 let _ = tx.send(());
             }
+            self.save(&map).await?;
         }
         Ok(())
     }
 
     pub async fn finish(&self, name: &str) {
         let mut map = self.inner.lock().await;
-        map.remove(name);
+        if map.remove(name).is_some() {
+            let _ = self.save(&map).await;
+        }
     }
 
     pub async fn is_running(&self, name: &str) -> bool {

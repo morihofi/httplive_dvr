@@ -1,34 +1,22 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
-use std::net::SocketAddr;
-use anyhow::{Context, Result};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+
+use anyhow::Result;
 use axum::{
-    Json, Router,
-    extract::{Path as AxPath, State},
-    http::StatusCode,
-    response::IntoResponse,
+    Router,
     routing::{get, post},
 };
 use clap::Parser;
-use serde::{Deserialize, Serialize};
-use tokio::{
-    fs,
-    process::Command,
-    sync::{Mutex, oneshot},
-    time::{Duration, sleep},
-};
 use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 use tracing::{Level, error, info};
+
+mod ffmpeg;
 mod handlers;
 mod recording;
 mod state;
 
 use handlers::{finalize, list_finished, list_live, start, stop};
+use recording::start_ffmpeg;
 use state::{AppState, RecordingManager};
-use crate::handlers::ListItem;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -61,11 +49,22 @@ async fn main() -> Result<()> {
     tokio::fs::create_dir_all(&pending_dir).await?;
     tokio::fs::create_dir_all(&finished_dir).await?;
 
+    let manager = Arc::new(RecordingManager::new(root.join("active_recordings.json")));
     let state = AppState {
         pending_dir: pending_dir.clone(),
         finished_dir: finished_dir.clone(),
-        manager: Arc::new(RecordingManager::default()),
+        manager: manager.clone(),
     };
+
+    ffmpeg::check_ffmpeg().await?;
+    info!("Self test with ffmpeg completed successfully");
+
+    let existing = manager.load().await?;
+    for req in existing {
+        if let Err(e) = start_ffmpeg(&state, &req).await {
+            error!(error=?e, name=%req.name, "failed to resume recording");
+        }
+    }
 
     //
     // API-Server (Steuerung)
@@ -78,7 +77,7 @@ async fn main() -> Result<()> {
         .route("/api/finished", get(list_finished))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .with_state(state.clone());
 
     //
     // VOD/Recording-Server (host only files)

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::{
     fs,
     process::Command,
@@ -12,7 +12,7 @@ use tracing::{error, info};
 
 use crate::state::AppState;
 
-#[derive(Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StartReq {
     pub name: String,
     pub input_url: String,
@@ -37,7 +37,7 @@ pub async fn start_ffmpeg(state: &AppState, req: &StartReq) -> Result<()> {
     let manager = state.manager.clone();
 
     let (stop_tx, mut stop_rx) = oneshot::channel();
-    state.manager.start(playlist_name.clone(), stop_tx).await?;
+    state.manager.start(req.clone(), stop_tx).await?;
 
     tokio::spawn(async move {
         loop {
