@@ -1,0 +1,13 @@
+version: "3.8"
+
+services:
+  dvr:
+    build: .
+    image: httplive_dvr
+    ports:
+      - "8080:8080" # API Server
+      - "8081:8081" # VOD Server
+    volumes:
+      - ./data:/data
+    environment:
+      HTTPLIVE_BASE_DIR: /data
