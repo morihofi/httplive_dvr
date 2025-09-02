@@ -1,0 +1,133 @@
+openapi: 3.0.3
+info:
+  title: HTTP Live DVR API
+  version: "1.0.0"
+servers:
+  - url: http://localhost:8080
+paths:
+  /api/start:
+    post:
+      summary: Start a new recording
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartRequest'
+      responses:
+        '200':
+          description: Recording started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+              example:
+                status: started
+        '400':
+          description: Bad request
+          content:
+            text/plain:
+              schema:
+                type: string
+  /api/stop/{name}:
+    post:
+      summary: Stop an active recording
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Recording stopped
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+              example:
+                status: stopped
+        '400':
+          description: Bad request
+          content:
+            text/plain:
+              schema:
+                type: string
+  /api/finalize/{name}:
+    post:
+      summary: Finalize a recording to VOD
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Recording finalized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+              example:
+                status: finalized
+        '400':
+          description: Bad request
+          content:
+            text/plain:
+              schema:
+                type: string
+  /api/live:
+    get:
+      summary: List live recordings
+      responses:
+        '200':
+          description: List of live recordings
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ListItem'
+  /api/finished:
+    get:
+      summary: List finished recordings
+      responses:
+        '200':
+          description: List of finished recordings
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ListItem'
+components:
+  schemas:
+    StartRequest:
+      type: object
+      required:
+        - name
+        - input_url
+      properties:
+        name:
+          type: string
+        input_url:
+          type: string
+          format: uri
+        hls_time:
+          type: integer
+          default: 6
+          description: HLS segment duration in seconds
+    ListItem:
+      type: object
+      properties:
+        name:
+          type: string
+        playlist:
+          type: string
+          description: Relative URL to the playlist
+    StatusResponse:
+      type: object
+      properties:
+        status:
+          type: string
