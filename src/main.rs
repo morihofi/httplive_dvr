@@ -1,17 +1,26 @@
-use std::{collections::HashMap, path::{Path, PathBuf}, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use axum::{
+    Json, Router,
     extract::{Path as AxPath, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use tokio::{fs, process::{Child, Command}, sync::Mutex};
+use tokio::{
+    fs,
+    process::Command,
+    sync::{Mutex, oneshot},
+    time::{Duration, sleep},
+};
 use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
-use tracing::{error, info, Level};
+use tracing::{Level, error, info};
 
 #[derive(Clone)]
 struct AppState {
@@ -23,31 +32,37 @@ struct AppState {
 
 #[derive(Default)]
 struct RecordingManager {
-    // name -> child process
-    inner: Mutex<HashMap<String, Child>>,
+    // name -> stop channel
+    inner: Mutex<HashMap<String, RecordingControl>>,
+}
+
+struct RecordingControl {
+    stop: Option<oneshot::Sender<()>>,
 }
 
 impl RecordingManager {
-    async fn start(&self, name: String, child: Child) -> Result<()> {
+    async fn start(&self, name: String, stop: oneshot::Sender<()>) -> Result<()> {
         let mut map = self.inner.lock().await;
         if map.contains_key(&name) {
             anyhow::bail!("Recording '{}' läuft bereits", name);
         }
-        map.insert(name, child);
+        map.insert(name, RecordingControl { stop: Some(stop) });
         Ok(())
     }
 
     async fn stop(&self, name: &str) -> Result<()> {
         let mut map = self.inner.lock().await;
-        if let Some(mut child) = map.remove(name) {
-            // Versuche sanft zu beenden, dann kill
-            if let Err(e) = child.start_kill() {
-                error!(%e, "start_kill fehlgeschlagen");
+        if let Some(mut ctrl) = map.remove(name) {
+            if let Some(tx) = ctrl.stop.take() {
+                let _ = tx.send(());
             }
-            // wartet kurz
-            let _ = child.wait().await;
         }
         Ok(())
+    }
+
+    async fn finish(&self, name: &str) {
+        let mut map = self.inner.lock().await;
+        map.remove(name);
     }
 
     async fn is_running(&self, name: &str) -> bool {
@@ -60,20 +75,28 @@ impl RecordingManager {
 struct StartReq {
     name: String,
     input_url: String,
-    #[serde(default = "default_hls_time")] hls_time: u32,
+    #[serde(default = "default_hls_time")]
+    hls_time: u32,
 }
-fn default_hls_time() -> u32 { 6 }
+fn default_hls_time() -> u32 {
+    6
+}
 
 #[derive(Serialize)]
-struct ListItem { name: String, playlist: String }
+struct ListItem {
+    name: String,
+    playlist: String,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Logging
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
-            .add_directive("ffmpeg_dvr=info".parse().unwrap())
-            .add_directive("tower_http=info".parse().unwrap()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("ffmpeg_dvr=info".parse()?)
+                .add_directive("tower_http=info".parse()?),
+        )
         .with_max_level(Level::INFO)
         .init();
 
@@ -114,7 +137,11 @@ async fn main() -> Result<()> {
 
 async fn api_start(State(state): State<AppState>, Json(req): Json<StartReq>) -> impl IntoResponse {
     match start_ffmpeg(&state, &req).await {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status":"started"}))).into_response(),
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status":"started"})),
+        )
+            .into_response(),
         Err(e) => {
             error!(error=?e, "start_ffmpeg failed");
             (StatusCode::BAD_REQUEST, e.to_string()).into_response()
@@ -122,9 +149,16 @@ async fn api_start(State(state): State<AppState>, Json(req): Json<StartReq>) -> 
     }
 }
 
-async fn api_stop(State(state): State<AppState>, AxPath(name): AxPath<String>) -> impl IntoResponse {
+async fn api_stop(
+    State(state): State<AppState>,
+    AxPath(name): AxPath<String>,
+) -> impl IntoResponse {
     match state.manager.stop(&name).await {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status":"stopped"}))).into_response(),
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status":"stopped"})),
+        )
+            .into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }
@@ -136,7 +170,10 @@ async fn api_list_live(State(state): State<AppState>) -> impl IntoResponse {
             let p = entry.path();
             if p.extension().and_then(|s| s.to_str()) == Some("m3u8") {
                 if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                    items.push(ListItem { name: stem.to_string(), playlist: format!("/live/{}", p.file_name().unwrap().to_string_lossy()) });
+                    items.push(ListItem {
+                        name: stem.to_string(),
+                        playlist: format!("/live/{}", p.file_name().unwrap().to_string_lossy()),
+                    });
                 }
             }
         }
@@ -154,7 +191,10 @@ async fn api_list_finished(State(state): State<AppState>) -> impl IntoResponse {
                 let idx = p.join("index.m3u8");
                 if idx.exists() {
                     if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-                        items.push(ListItem { name: name.to_string(), playlist: format!("/vod/{}/index.m3u8", name) });
+                        items.push(ListItem {
+                            name: name.to_string(),
+                            playlist: format!("/vod/{}/index.m3u8", name),
+                        });
                     }
                 }
             }
@@ -163,44 +203,102 @@ async fn api_list_finished(State(state): State<AppState>) -> impl IntoResponse {
     Json(items)
 }
 
-async fn api_finalize(State(state): State<AppState>, AxPath(name): AxPath<String>) -> impl IntoResponse {
+async fn api_finalize(
+    State(state): State<AppState>,
+    AxPath(name): AxPath<String>,
+) -> impl IntoResponse {
     match finalize_to_vod(&state, &name).await {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status":"finalized"}))).into_response(),
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status":"finalized"})),
+        )
+            .into_response(),
         Err(e) => {
-            error!(error=?e, "finalize fehlgeschlagen");
+            error!(error=?e, "finalize failed");
             (StatusCode::BAD_REQUEST, e.to_string()).into_response()
         }
     }
 }
 
 async fn start_ffmpeg(state: &AppState, req: &StartReq) -> Result<()> {
-    let playlist = state.pending_dir.join(format!("{}.m3u8", req.name));
-    let seg_pattern = state.pending_dir.join(format!("{}_seg_%Y-%m-%d_%H-%M-%S_%03d.ts", req.name));
-
     // Falls noch läuft: Fehler werfen
     if state.manager.is_running(&req.name).await {
-        anyhow::bail!("Recording '{}' läuft bereits", req.name);
+        anyhow::bail!("Recording '{}' is already running", req.name);
     }
 
-    // ffmpeg Prozess wie dein Aufruf
-    let mut cmd = Command::new("ffmpeg");
-    cmd.kill_on_drop(true)
-        .arg("-y")
-        .args(["-i", &req.input_url])
-        .args(["-c", "copy"]) // kein Re-Encode
-        .args(["-f", "hls"])
-        .args(["-hls_time", &req.hls_time.to_string()])
-        .args(["-hls_list_size", "0"])
-        .args(["-hls_playlist_type", "event"])
-        .args(["-hls_flags", "append_list+discont_start+program_date_time+temp_file"])
-        .args(["-strftime", "1"])
-        .args(["-hls_segment_filename", &seg_pattern.to_string_lossy()])
-        .arg(playlist.to_string_lossy().to_string());
+    let playlist_name = req.name.clone();
+    let input_url = req.input_url.clone();
+    let hls_time = req.hls_time;
+    let pending_dir = state.pending_dir.clone();
+    let manager = state.manager.clone();
 
-    info!("Starte ffmpeg: {}", format_command(&cmd));
+    let (stop_tx, mut stop_rx) = oneshot::channel();
+    state.manager.start(playlist_name.clone(), stop_tx).await?;
 
-    let child = cmd.spawn().context("ffmpeg konnte nicht gestartet werden")?;
-    state.manager.start(req.name.clone(), child).await?;
+    tokio::spawn(async move {
+        loop {
+            let playlist = pending_dir.join(format!("{}.m3u8", playlist_name));
+            let seg_pattern =
+                pending_dir.join(format!("{}_seg_%Y-%m-%d_%H-%M-%S_%03d.ts", playlist_name));
+
+            let mut cmd = Command::new("ffmpeg");
+            cmd.kill_on_drop(true)
+                .arg("-y")
+                .args(["-i", &input_url])
+                .args(["-c", "copy"])
+                .args(["-f", "hls"])
+                .args(["-hls_time", &hls_time.to_string()])
+                .args(["-hls_list_size", "0"])
+                .args(["-hls_playlist_type", "event"])
+                .args([
+                    "-hls_flags",
+                    "append_list+discont_start+program_date_time+temp_file",
+                ])
+                .args(["-strftime", "1"])
+                .args(["-hls_segment_filename", &seg_pattern.to_string_lossy()])
+                .arg(playlist.to_string_lossy().to_string());
+
+            info!("Starte ffmpeg: {}", format_command(&cmd));
+
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    error!(error=?e, "ffmpeg could not be started");
+                    break;
+                }
+            };
+
+            let mut restart = false;
+            tokio::select! {
+                res = child.wait() => {
+                    match res {
+                        Ok(status) if status.success() => {
+                            // normal beendet
+                        }
+                        Ok(_) => {
+                            restart = true;
+                        }
+                        Err(e) => {
+                            error!(error=?e, "ffmpeg wait fehlgeschlagen");
+                        }
+                    }
+                }
+                _ = &mut stop_rx => {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                }
+            }
+
+            if !restart {
+                break;
+            }
+            info!("ffmpeg beendet - versuche Neustart in 3s");
+            sleep(Duration::from_secs(3)).await;
+        }
+
+        manager.finish(&playlist_name).await;
+    });
+
     Ok(())
 }
 
@@ -208,7 +306,9 @@ fn format_command(cmd: &Command) -> String {
     use std::fmt::Write as _;
     let mut s = String::new();
     s.push_str("ffmpeg ");
-    if let Some(args) = cmd.as_std().get_args().next() { let _ = args; }
+    if let Some(args) = cmd.as_std().get_args().next() {
+        let _ = args;
+    }
     // Tokio bietet keine direkte args()-Iteration, daher hacky:
     // Wir loggen nur, dass ffmpeg gestartet wurde. (Optional: selbst String bauen.)
     s
@@ -283,27 +383,44 @@ fn rewrite_playlist_to_vod(original: &str, segments: &Vec<String>) -> Result<Str
             out.push_str("#EXT-X-PLAYLIST-TYPE:VOD\n");
             continue;
         }
-        if l.starts_with("#EXT-X-ENDLIST") { has_endlist = true; }
+        if l.starts_with("#EXT-X-ENDLIST") {
+            has_endlist = true;
+        }
         // Alle anderen Zeilen (inkl. PROGRAM-DATE-TIME) unverändert übernehmen
         if l.starts_with('#') {
-            out.push_str(l); out.push('\n');
+            out.push_str(l);
+            out.push('\n');
         } else {
             // Segment-URI ➜ nur Basename
-            let base = Path::new(l).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| l.to_string());
-            out.push_str(&base); out.push('\n');
+            let base = Path::new(l)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| l.to_string());
+            out.push_str(&base);
+            out.push('\n');
         }
     }
 
-    if !has_header { out = format!("#EXTM3U\n{}", out); }
-    if !has_type { out = out.replacen("#EXTM3U\n", "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n", 1); }
-    if !has_endlist { out.push_str("#EXT-X-ENDLIST\n"); }
+    if !has_header {
+        out = format!("#EXTM3U\n{}", out);
+    }
+    if !has_type {
+        out = out.replacen("#EXTM3U\n", "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n", 1);
+    }
+    if !has_endlist {
+        out.push_str("#EXT-X-ENDLIST\n");
+    }
 
     Ok(out)
 }
 
 fn normalize_segment_path(pending_dir: &Path, seg: &str) -> PathBuf {
     let p = Path::new(seg);
-    if p.is_absolute() { p.to_path_buf() } else { pending_dir.join(p) }
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        pending_dir.join(p)
+    }
 }
 
 // Optional: Beispiel eines einfachen Probe-Aufrufs via ffmpeg-next (nicht kritisch für DVR)
@@ -311,7 +428,8 @@ fn normalize_segment_path(pending_dir: &Path, seg: &str) -> PathBuf {
 fn _probe_input(url: &str) -> Result<()> {
     // Warnung: erfordert korrekt installierte FFmpeg-Libs zur Buildzeit
     ffmpeg_next::format::network::init();
-    let mut ictx = ffmpeg_next::format::input(&url).context("ffmpeg-next: input öffnen fehlgeschlagen")?;
+    let mut ictx =
+        ffmpeg_next::format::input(&url).context("ffmpeg-next: input öffnen fehlgeschlagen")?;
     let _ = ictx.streams();
     Ok(())
 }
