@@ -4,7 +4,7 @@ use crate::recording::StartReq;
 use anyhow::Result;
 use tokio::{
     fs,
-    sync::{Mutex, oneshot},
+    sync::{oneshot, Mutex},
 };
 
 #[derive(Clone)]
@@ -67,12 +67,14 @@ impl RecordingManager {
 
     pub async fn stop(&self, name: &str) -> Result<()> {
         let mut map = self.inner.lock().await;
-        if let Some(mut ctrl) = map.remove(name) {
-            if let Some(tx) = ctrl.stop.take() {
-                let _ = tx.send(());
-            }
-            self.save(&map).await?;
+        let mut ctrl = match map.remove(name) {
+            Some(ctrl) => ctrl,
+            None => anyhow::bail!("Recording '{}' is not running", name),
+        };
+        if let Some(tx) = ctrl.stop.take() {
+            let _ = tx.send(());
         }
+        self.save(&map).await?;
         Ok(())
     }
 

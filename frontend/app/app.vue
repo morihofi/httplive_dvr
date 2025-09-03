@@ -55,7 +55,7 @@
 
             <div class="flex-1"></div>
 
-            <div class="flex items-center gap-2">
+            <div v-if="isEvent" class="flex items-center gap-2">
               <span class="px-2.5 py-1.5 rounded-full border border-slate-700 bg-slate-800 text-slate-200 text-sm font-medium
            flex items-center gap-1.5 select-none" :class="{ 'opacity-70': !atLiveEdge }" :title="lagLabel">
                 <span class="rounded-full inline-block"
@@ -75,8 +75,7 @@
           </div>
 
           <!-- DVR bar -->
-          <div class="w-full h-2 rounded-full bg-slate-800 relative cursor-pointer" @mousedown="onBarDown"
-            @touchstart.passive="onBarTouch">
+          <div class="w-full h-2 rounded-full bg-slate-800 relative cursor-pointer" @pointerdown="onBarPointer">
             <div class="absolute inset-y-0 left-0 bg-slate-700" :style="{ width: bufferedPct + '%' }"></div>
             <div class="absolute inset-y-0 left-0 bg-gradient-to-r from-emerald-300 to-cyan-300"
               :style="{ width: playedPct + '%' }"></div>
@@ -127,7 +126,7 @@ import { ClientOnly } from '#components'
 import { LucideCalendarArrowUp, LucideFullscreen, LucidePause, LucidePlay, LucideVolume2, LucideVolumeOff } from 'lucide-vue-next'
 
 /** CONFIG **/
-const src: string = 'http://localhost:8080/live/obstest.m3u8' // <— anpassen
+const src: string = 'http://192.168.178.124:9901/vod/ef29-summerboat/index.m3u8' // <— anpassen
 const LAST_SEG_SAFE_DELTA = 0.25 // s
 const REFRESH_NATIVE_MS = 4000   // ms
 const CONTROLS_HIDE_MS = 2000    // ms
@@ -153,6 +152,7 @@ const dtValue = ref<string>('')
 const currentTime = ref(0)
 const bufferedEnd = ref(0)
 const lastDetails = ref<LevelDetails | null>(null)
+const playlistType = ref<'VOD' | 'EVENT' | null>(null)
 
 /** Native HLS parsed frags **/
 interface FragInfo { start: number; end: number; duration: number; programDateTime?: number }
@@ -174,6 +174,7 @@ watchEffect(() => {
 const liveDelta = computed(() => liveSync.value - currentTime.value) // + = hinter Live, - = vor Live
 const atLiveEdge = computed(() => Math.abs(liveDelta.value) < 0.75)  // gleicher Schwellwert überall
 const liveLag = computed(() => Math.max(0, liveDelta.value))
+const isEvent = computed(() => playlistType.value !== 'VOD')
 
 const playedPct = computed<number>(() => {
   const [ws, we] = dvrWindow()
@@ -250,7 +251,10 @@ function setupPlayback() {
       }
     })
 
-    hls.on(HlsEvents.LEVEL_UPDATED, (_e, { details }) => { lastDetails.value = details })
+      hls.on(HlsEvents.LEVEL_UPDATED, (_e, { details }) => {
+        lastDetails.value = details
+        playlistType.value = details.type as 'VOD' | 'EVENT' | null
+      })
 
     hls.attachMedia(v)
     hls.loadSource(src)
@@ -269,26 +273,33 @@ function scheduleManualPlaylistRefresh() {
     try {
       const res = await fetch(src, { cache: 'no-store' })
       const txt = await res.text()
-      const { frags } = parseM3U8(txt)
+      const { frags, type } = parseM3U8(txt)
       manualFrags.value = frags
+      playlistType.value = type
     } catch { }
     manualTimer = window.setTimeout(loop, REFRESH_NATIVE_MS)
   }
   loop()
 }
 
-function parseM3U8(text: string): { frags: FragInfo[]; seq: number } {
+function parseM3U8(text: string): { frags: FragInfo[]; seq: number; type: 'VOD' | 'EVENT' | null } {
   const lines = text.split(/\r?\n/)
   let seq = 0
   let targetDuration = 0
   let curDur: number | null = null
   let curPDT: number | undefined
+  let type: 'VOD' | 'EVENT' | null = null
   const frags: FragInfo[] = []
   const afterColon = (s: string) => s.split(':')[1] ?? ''
 
   for (const ln of lines) {
     if (ln.startsWith('#EXT-X-MEDIA-SEQUENCE:')) seq = parseInt(afterColon(ln) || '0', 10)
     else if (ln.startsWith('#EXT-X-TARGETDURATION:')) targetDuration = parseFloat(afterColon(ln) || '0')
+    else if (ln.startsWith('#EXT-X-PLAYLIST-TYPE:')) {
+      const val = afterColon(ln).trim()
+      if (val === 'VOD') type = 'VOD'
+      else if (val === 'EVENT') type = 'EVENT'
+    }
     else if (ln.startsWith('#EXTINF:')) curDur = parseFloat(afterColon(ln) || `${targetDuration}`)
     else if (ln.startsWith('#EXT-X-PROGRAM-DATE-TIME:')) {
       const val = ln.substring('#EXT-X-PROGRAM-DATE-TIME:'.length).trim()
@@ -296,7 +307,7 @@ function parseM3U8(text: string): { frags: FragInfo[]; seq: number } {
       if (!isNaN(t)) curPDT = t
     }
     else if (ln && !ln.startsWith('#')) {
-      const dur = (curDur ?? targetDuration)
+      const dur = curDur ?? targetDuration
       const start = frags.length ? frags[frags.length - 1]!.end : 0
       const end = start + dur
       frags.push({ start, end, duration: dur, programDateTime: curPDT })
@@ -304,7 +315,7 @@ function parseM3U8(text: string): { frags: FragInfo[]; seq: number } {
       curPDT = undefined
     }
   }
-  return { frags, seq }
+  return { frags, seq, type }
 }
 
 /** RAF **/
@@ -581,47 +592,32 @@ function onJump() {
 }
 
 /** Seekbar **/
-function onBarDown(e: MouseEvent) {
+function onBarPointer(e: PointerEvent) {
   userInteracting.value = true
-  showControls()
+  if (e.pointerType === 'mouse') showControls()
   const el = e.currentTarget as HTMLDivElement
   const rect = el.getBoundingClientRect()
-  const p = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-  seekToPct(p)
-  const move = (ev: MouseEvent) => {
-    const p = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width))
-    seekToPct(p)
+  const getP = (clientX: number) => Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+  seekToPct(getP(e.clientX))
+  const move = (ev: PointerEvent) => {
+    seekToPct(getP(ev.clientX))
   }
   const up = () => {
-    window.removeEventListener('mousemove', move)
-    window.removeEventListener('mouseup', up)
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', up)
     userInteracting.value = false
     scheduleHide()
   }
-  window.addEventListener('mousemove', move)
-  window.addEventListener('mouseup', up)
-}
-function onBarTouch(e: TouchEvent) {
-  userInteracting.value = true
-  const el = e.currentTarget as HTMLDivElement
-  const rect = el.getBoundingClientRect()
-  const getP = (t: Touch) => Math.max(0, Math.min(1, (t.clientX - rect.left) / rect.width))
-  if (e.touches[0]) seekToPct(getP(e.touches[0]))
-  const end = () => { userInteracting.value = false; scheduleHide(); window.removeEventListener('touchend', end) }
-  window.addEventListener('touchend', end)
+  window.addEventListener('pointermove', move)
+  window.addEventListener('pointerup', up)
 }
 function seekToPct(p: number) {
   const [ws, we] = dvrWindow()
-  const desired = ws + p * (we - ws)
+  const t = ws + p * (we - ws)
   const v = videoEl.value
   if (!v) return
-  const b = v.buffered
-  let t = desired
-  if (b.length) {
-    const safeEnd = Math.max(b.end(b.length - 1) - LAST_SEG_SAFE_DELTA, 0)
-    t = Math.min(t, safeEnd)
-  }
   v.currentTime = t
+  hls?.startLoad?.()
 }
 
 function seekSafely(target: number) {

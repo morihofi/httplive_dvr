@@ -6,12 +6,19 @@ use axum::{
 };
 use tracing::{error, info};
 
-use crate::{recording::finalize_to_vod, state::AppState};
+use crate::{
+    recording::{finalize_to_vod, sanitize_name},
+    state::AppState,
+};
 
 pub async fn finalize(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    Path(raw_name): Path<String>,
 ) -> impl IntoResponse {
+    let name = match sanitize_name(&raw_name) {
+        Ok(n) => n,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
     info!(%name, "finalize request received");
     match finalize_to_vod(&state, &name).await {
         Ok(()) => {

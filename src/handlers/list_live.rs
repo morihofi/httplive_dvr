@@ -11,10 +11,12 @@ pub async fn list_live(State(state): State<AppState>) -> Json<Vec<ListItem>> {
             let p = entry.path();
             if p.extension().and_then(|s| s.to_str()) == Some("m3u8") {
                 if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                    items.push(ListItem {
-                        name: stem.to_string(),
-                        playlist: format!("/live/{}", p.file_name().unwrap().to_string_lossy()),
-                    });
+                    if let Some(fname) = p.file_name() {
+                        items.push(ListItem {
+                            name: stem.to_string(),
+                            playlist: format!("/live/{}", fname.to_string_lossy()),
+                        });
+                    }
                 }
             }
         }
