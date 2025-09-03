@@ -152,7 +152,7 @@ pub async fn finalize_to_vod(state: &AppState, name: &str) -> Result<()> {
     // 4) move segments without duplication and adjust URIs
     info!(%name, total_segments=segments.len(), "finalizing recording - moving segments");
     for seg in &segments {
-        let src = normalize_segment_path(&state.pending_dir, seg);
+        let src = normalize_segment_path(&state.pending_dir, seg)?;
         let dst = dst_dir.join(Path::new(seg).file_name().unwrap());
         if fs::metadata(&dst).await.is_ok() {
             debug!(dst=?dst, "segment already moved, skipping");
@@ -254,12 +254,30 @@ fn rewrite_playlist_to_vod(original: &str) -> Result<String> {
     Ok(out)
 }
 
-fn normalize_segment_path(pending_dir: &Path, seg: &str) -> PathBuf {
+fn normalize_segment_path(pending_dir: &Path, seg: &str) -> Result<PathBuf> {
     let p = Path::new(seg);
-    if p.is_absolute() {
+    let joined = if p.is_absolute() {
         p.to_path_buf()
     } else {
         pending_dir.join(p)
+    };
+
+    let base = std::fs::canonicalize(pending_dir).with_context(|| {
+        format!(
+            "failed to canonicalize pending dir {}",
+            pending_dir.display()
+        )
+    })?;
+    let canon = std::fs::canonicalize(&joined)
+        .with_context(|| format!("failed to canonicalize segment path {}", joined.display()))?;
+
+    if canon.starts_with(&base) {
+        Ok(canon)
+    } else {
+        anyhow::bail!(
+            "segment path {} escapes pending directory",
+            joined.display()
+        );
     }
 }
 
