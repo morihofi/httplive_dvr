@@ -118,13 +118,11 @@ pub async fn start_ffmpeg(state: &AppState, req: &StartReq, allow_existing: bool
 }
 
 fn format_command(cmd: &Command) -> String {
-    let mut s = String::new();
-    s.push_str("ffmpeg ");
-    if let Some(args) = cmd.as_std().get_args().next() {
-        let _ = args;
+    let mut s = String::from("ffmpeg");
+    for arg in cmd.as_std().get_args() {
+        s.push(' ');
+        s.push_str(&arg.to_string_lossy());
     }
-    // Tokio does not provide direct args() iteration, so this is minimal.
-    // We only log that ffmpeg was started. (Optionally build the string manually.)
     s
 }
 
