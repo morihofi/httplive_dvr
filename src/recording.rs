@@ -24,30 +24,48 @@ fn default_hls_time() -> u32 {
     6
 }
 
+pub fn sanitize_name(name: &str) -> Result<String> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        anyhow::bail!("invalid name: {}", name);
+    }
+    Ok(name.to_string())
+}
+
 pub async fn start_ffmpeg(state: &AppState, req: &StartReq, allow_existing: bool) -> Result<()> {
+    let name = sanitize_name(&req.name)?;
+
     // If already running: return error
-    if state.manager.is_running(&req.name).await {
-        anyhow::bail!("Recording '{}' is already running", req.name);
+    if state.manager.is_running(&name).await {
+        anyhow::bail!("Recording '{}' is already running", name);
     }
 
     // Avoid collisions with existing playlists when creating new jobs via API.
     // Resumed recordings may already have on-disk state; in that case we allow it.
     if !allow_existing {
-        let pending_pl = state.pending_dir.join(format!("{}.m3u8", req.name));
-        let finished_pl = state.finished_dir.join(&req.name).join("index.m3u8");
+        let pending_pl = state.pending_dir.join(format!("{}.m3u8", name));
+        let finished_pl = state.finished_dir.join(&name).join("index.m3u8");
         if fs::metadata(&pending_pl).await.is_ok() || fs::metadata(&finished_pl).await.is_ok() {
-            anyhow::bail!("Recording '{}' already exists", req.name);
+            anyhow::bail!("Recording '{}' already exists", name);
         }
     }
 
-    let playlist_name = req.name.clone();
+    let playlist_name = name.clone();
     let input_url = req.input_url.clone();
     let hls_time = req.hls_time;
     let pending_dir = state.pending_dir.clone();
     let manager = state.manager.clone();
 
     let (stop_tx, mut stop_rx) = oneshot::channel();
-    state.manager.start(req.clone(), stop_tx).await?;
+    let sanitized_req = StartReq {
+        name: name.clone(),
+        input_url: req.input_url.clone(),
+        hls_time: req.hls_time,
+    };
+    state.manager.start(sanitized_req, stop_tx).await?;
 
     tokio::spawn(async move {
         loop {
@@ -127,8 +145,10 @@ fn format_command(cmd: &Command) -> String {
 }
 
 pub async fn finalize_to_vod(state: &AppState, name: &str) -> Result<()> {
+    let name = sanitize_name(name)?;
+
     // 1) stop recording if active
-    let _ = state.manager.stop(name).await;
+    let _ = state.manager.stop(&name).await;
 
     // 2) read event playlist
     let src_pl = state.pending_dir.join(format!("{}.m3u8", name));
@@ -140,7 +160,7 @@ pub async fn finalize_to_vod(state: &AppState, name: &str) -> Result<()> {
     let segments = extract_segment_list(&content);
 
     // 3) prepare destination directory
-    let dst_dir = state.finished_dir.join(name);
+    let dst_dir = state.finished_dir.join(&name);
     let dst_pl = dst_dir.join("index.m3u8");
     if fs::metadata(&dst_pl).await.is_ok() {
         anyhow::bail!("Recording '{}' already finalized", name);

@@ -1,13 +1,20 @@
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 
-use crate::state::AppState;
+use crate::{recording::sanitize_name, state::AppState};
 
-pub async fn stop(State(state): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
+pub async fn stop(
+    State(state): State<AppState>,
+    Path(raw_name): Path<String>,
+) -> impl IntoResponse {
+    let name = match sanitize_name(&raw_name) {
+        Ok(n) => n,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
     match state.manager.stop(&name).await {
         Ok(()) => (
             StatusCode::OK,
