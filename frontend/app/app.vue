@@ -75,8 +75,7 @@
           </div>
 
           <!-- DVR bar -->
-          <div class="w-full h-2 rounded-full bg-slate-800 relative cursor-pointer" @mousedown="onBarDown"
-            @touchstart.passive="onBarTouch">
+          <div class="w-full h-2 rounded-full bg-slate-800 relative cursor-pointer" @pointerdown="onBarPointer">
             <div class="absolute inset-y-0 left-0 bg-slate-700" :style="{ width: bufferedPct + '%' }"></div>
             <div class="absolute inset-y-0 left-0 bg-gradient-to-r from-emerald-300 to-cyan-300"
               :style="{ width: playedPct + '%' }"></div>
@@ -127,7 +126,7 @@ import { ClientOnly } from '#components'
 import { LucideCalendarArrowUp, LucideFullscreen, LucidePause, LucidePlay, LucideVolume2, LucideVolumeOff } from 'lucide-vue-next'
 
 /** CONFIG **/
-const src: string = 'http://localhost:8080/live/obstest.m3u8' // <— anpassen
+const src: string = 'http://192.168.178.124:9901/vod/ef29-summerboat/index.m3u8' // <— anpassen
 const LAST_SEG_SAFE_DELTA = 0.25 // s
 const REFRESH_NATIVE_MS = 4000   // ms
 const CONTROLS_HIDE_MS = 2000    // ms
@@ -581,47 +580,32 @@ function onJump() {
 }
 
 /** Seekbar **/
-function onBarDown(e: MouseEvent) {
+function onBarPointer(e: PointerEvent) {
   userInteracting.value = true
-  showControls()
+  if (e.pointerType === 'mouse') showControls()
   const el = e.currentTarget as HTMLDivElement
   const rect = el.getBoundingClientRect()
-  const p = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-  seekToPct(p)
-  const move = (ev: MouseEvent) => {
-    const p = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width))
-    seekToPct(p)
+  const getP = (clientX: number) => Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+  seekToPct(getP(e.clientX))
+  const move = (ev: PointerEvent) => {
+    seekToPct(getP(ev.clientX))
   }
   const up = () => {
-    window.removeEventListener('mousemove', move)
-    window.removeEventListener('mouseup', up)
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', up)
     userInteracting.value = false
     scheduleHide()
   }
-  window.addEventListener('mousemove', move)
-  window.addEventListener('mouseup', up)
-}
-function onBarTouch(e: TouchEvent) {
-  userInteracting.value = true
-  const el = e.currentTarget as HTMLDivElement
-  const rect = el.getBoundingClientRect()
-  const getP = (t: Touch) => Math.max(0, Math.min(1, (t.clientX - rect.left) / rect.width))
-  if (e.touches[0]) seekToPct(getP(e.touches[0]))
-  const end = () => { userInteracting.value = false; scheduleHide(); window.removeEventListener('touchend', end) }
-  window.addEventListener('touchend', end)
+  window.addEventListener('pointermove', move)
+  window.addEventListener('pointerup', up)
 }
 function seekToPct(p: number) {
   const [ws, we] = dvrWindow()
-  const desired = ws + p * (we - ws)
+  const t = ws + p * (we - ws)
   const v = videoEl.value
   if (!v) return
-  const b = v.buffered
-  let t = desired
-  if (b.length) {
-    const safeEnd = Math.max(b.end(b.length - 1) - LAST_SEG_SAFE_DELTA, 0)
-    t = Math.min(t, safeEnd)
-  }
   v.currentTime = t
+  hls?.startLoad?.()
 }
 
 function seekSafely(target: number) {
