@@ -118,6 +118,10 @@ components:
           type: integer
           default: 6
           description: HLS segment duration in seconds
+        resume:
+          type: boolean
+          default: false
+          description: Continue a stopped recording by appending to existing files
     ListItem:
       type: object
       properties:

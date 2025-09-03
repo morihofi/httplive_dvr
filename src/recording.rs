@@ -18,6 +18,10 @@ pub struct StartReq {
     pub input_url: String,
     #[serde(default = "default_hls_time")]
     pub hls_time: u32,
+    #[serde(default)]
+    /// When true, continue an existing recording by appending to the current
+    /// playlist and segments if they are present on disk.
+    pub resume: bool,
 }
 
 fn default_hls_time() -> u32 {
@@ -64,6 +68,7 @@ pub async fn start_ffmpeg(state: &AppState, req: &StartReq, allow_existing: bool
         name: name.clone(),
         input_url: req.input_url.clone(),
         hls_time: req.hls_time,
+        resume: req.resume,
     };
     state.manager.start(sanitized_req, stop_tx).await?;
 
