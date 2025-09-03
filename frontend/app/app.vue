@@ -55,7 +55,7 @@
 
             <div class="flex-1"></div>
 
-            <div class="flex items-center gap-2">
+            <div v-if="isEvent" class="flex items-center gap-2">
               <span class="px-2.5 py-1.5 rounded-full border border-slate-700 bg-slate-800 text-slate-200 text-sm font-medium
            flex items-center gap-1.5 select-none" :class="{ 'opacity-70': !atLiveEdge }" :title="lagLabel">
                 <span class="rounded-full inline-block"
@@ -152,6 +152,7 @@ const dtValue = ref<string>('')
 const currentTime = ref(0)
 const bufferedEnd = ref(0)
 const lastDetails = ref<LevelDetails | null>(null)
+const playlistType = ref<'VOD' | 'EVENT' | null>(null)
 
 /** Native HLS parsed frags **/
 interface FragInfo { start: number; end: number; duration: number; programDateTime?: number }
@@ -173,6 +174,7 @@ watchEffect(() => {
 const liveDelta = computed(() => liveSync.value - currentTime.value) // + = hinter Live, - = vor Live
 const atLiveEdge = computed(() => Math.abs(liveDelta.value) < 0.75)  // gleicher Schwellwert überall
 const liveLag = computed(() => Math.max(0, liveDelta.value))
+const isEvent = computed(() => playlistType.value !== 'VOD')
 
 const playedPct = computed<number>(() => {
   const [ws, we] = dvrWindow()
@@ -249,7 +251,10 @@ function setupPlayback() {
       }
     })
 
-    hls.on(HlsEvents.LEVEL_UPDATED, (_e, { details }) => { lastDetails.value = details })
+      hls.on(HlsEvents.LEVEL_UPDATED, (_e, { details }) => {
+        lastDetails.value = details
+        playlistType.value = details.type as 'VOD' | 'EVENT' | null
+      })
 
     hls.attachMedia(v)
     hls.loadSource(src)
@@ -268,26 +273,33 @@ function scheduleManualPlaylistRefresh() {
     try {
       const res = await fetch(src, { cache: 'no-store' })
       const txt = await res.text()
-      const { frags } = parseM3U8(txt)
+      const { frags, type } = parseM3U8(txt)
       manualFrags.value = frags
+      playlistType.value = type
     } catch { }
     manualTimer = window.setTimeout(loop, REFRESH_NATIVE_MS)
   }
   loop()
 }
 
-function parseM3U8(text: string): { frags: FragInfo[]; seq: number } {
+function parseM3U8(text: string): { frags: FragInfo[]; seq: number; type: 'VOD' | 'EVENT' | null } {
   const lines = text.split(/\r?\n/)
   let seq = 0
   let targetDuration = 0
   let curDur: number | null = null
   let curPDT: number | undefined
+  let type: 'VOD' | 'EVENT' | null = null
   const frags: FragInfo[] = []
   const afterColon = (s: string) => s.split(':')[1] ?? ''
 
   for (const ln of lines) {
     if (ln.startsWith('#EXT-X-MEDIA-SEQUENCE:')) seq = parseInt(afterColon(ln) || '0', 10)
     else if (ln.startsWith('#EXT-X-TARGETDURATION:')) targetDuration = parseFloat(afterColon(ln) || '0')
+    else if (ln.startsWith('#EXT-X-PLAYLIST-TYPE:')) {
+      const val = afterColon(ln).trim()
+      if (val === 'VOD') type = 'VOD'
+      else if (val === 'EVENT') type = 'EVENT'
+    }
     else if (ln.startsWith('#EXTINF:')) curDur = parseFloat(afterColon(ln) || `${targetDuration}`)
     else if (ln.startsWith('#EXT-X-PROGRAM-DATE-TIME:')) {
       const val = ln.substring('#EXT-X-PROGRAM-DATE-TIME:'.length).trim()
@@ -295,7 +307,7 @@ function parseM3U8(text: string): { frags: FragInfo[]; seq: number } {
       if (!isNaN(t)) curPDT = t
     }
     else if (ln && !ln.startsWith('#')) {
-      const dur = (curDur ?? targetDuration)
+      const dur = curDur ?? targetDuration
       const start = frags.length ? frags[frags.length - 1]!.end : 0
       const end = start + dur
       frags.push({ start, end, duration: dur, programDateTime: curPDT })
@@ -303,7 +315,7 @@ function parseM3U8(text: string): { frags: FragInfo[]; seq: number } {
       curPDT = undefined
     }
   }
-  return { frags, seq }
+  return { frags, seq, type }
 }
 
 /** RAF **/
