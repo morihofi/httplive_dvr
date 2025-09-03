@@ -76,7 +76,7 @@ pub async fn start_ffmpeg(state: &AppState, req: &StartReq, allow_existing: bool
             let mut cmd = Command::new("ffmpeg");
             cmd.kill_on_drop(true)
                 .arg("-y")
-                .args(["-rtsp_transport", "tcp"])
+                //.args(["-rtsp_transport", "tcp"])
                 .arg("-re")
                 .args(["-i", &input_url])
                 .args(["-c", "copy"])
